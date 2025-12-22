@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Navbar from '../components/Navbar.jsx';
+import TeamFit from '../components/TeamFit.jsx';
+import TeamDiscovery from '../components/TeamDiscovery.jsx';
 import { supabase } from '../lib/supabase.js';
 import { useAuth } from '../hooks/useAuth.js';
 
@@ -29,38 +31,111 @@ function EventDetail() {
   const [teamName, setTeamName] = useState('');
   const [creatingTeam, setCreatingTeam] = useState(false);
   const [teamError, setTeamError] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+
+  // Edit/Delete states
+  const [isEditing, setIsEditing] = useState(false);
+  const [editFormData, setEditFormData] = useState(null);
+  const [updating, setUpdating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   useEffect(() => {
     if (id) {
       fetchEvent();
+    }
+  }, [id]);
+
+  // ✅ Separate effect to fetch interest and teams ONLY after event is loaded
+  useEffect(() => {
+    if (event && id) {
       fetchInterestData();
       fetchTeams();
     }
-  }, [id, user]);
+  }, [event, id, user]);
 
   const fetchEvent = async () => {
     try {
       setLoading(true);
       setError(null);
+      setEvent(null);
+
+      // Validate event ID exists
+      if (!id) {
+        setError('Invalid event ID');
+        setLoading(false);
+        return;
+      }
 
       const { data, error: fetchError } = await supabase
         .from('events')
         .select('*')
         .eq('id', id)
-        .single();
+        .maybeSingle(); // ✅ Changed from .single() to .maybeSingle()
 
-      if (fetchError) throw fetchError;
+      if (fetchError) {
+        console.error('Error fetching event:', fetchError);
+        setError('Failed to load event. Please try again.');
+        setLoading(false);
+        return;
+      }
 
+      // ✅ Explicit check for no data
+      if (!data) {
+        setError('Event not found');
+        setLoading(false);
+        return;
+      }
+
+      // Check visibility - if event is college-restricted
+      if (data.allowed_college) {
+        // Fetch user's college
+        if (user) {
+          const { data: profileData, error: profileError } = await supabase
+            .from('profiles')
+            .select('college')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (profileError) {
+            console.error('Error fetching profile:', profileError);
+            setError('Failed to verify access. Please try again.');
+            setLoading(false);
+            return;
+          }
+
+          // Check if user has access
+          if (!profileData || profileData.college !== data.allowed_college) {
+            // User doesn't have access to this restricted event
+            setError('You do not have access to this event. This event is restricted to students from ' + data.allowed_college + '.');
+            setEvent(null);
+            setLoading(false);
+            return;
+          }
+        } else {
+          // Not logged in, can't access restricted event
+          setError('This event is restricted. Please log in to view.');
+          setEvent(null);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // ✅ Only set event if all checks pass
       setEvent(data);
     } catch (err) {
       console.error('Error fetching event:', err);
-      setError('Event not found or failed to load.');
+      setError('An unexpected error occurred. Please try again.');
+      setEvent(null);
     } finally {
       setLoading(false);
     }
   };
 
   const fetchInterestData = async () => {
+    // ✅ Safety guard - don't fetch if no event ID
+    if (!id) return;
+
     try {
       // Get interest count
       const { data: interests, error: countError } = await supabase
@@ -102,6 +177,7 @@ function EventDetail() {
       }
     } catch (err) {
       console.error('Error fetching interest data:', err);
+      // Don't set error state - this is non-critical data
     }
   };
 
@@ -166,17 +242,34 @@ function EventDetail() {
   };
 
   const fetchTeams = async () => {
+    // ✅ Safety guard - don't fetch if no event ID
+    if (!id) return;
+
     try {
       setTeamsLoading(true);
 
-      // Fetch teams for this event with member counts
+      // Fetch user profile for team fit analysis
+      if (user) {
+        const { data: profileData } = await supabase
+          .from('profiles')
+          .select('skills')
+          .eq('user_id', user.id)
+          .maybeSingle();
+        setUserProfile(profileData);
+      }
+
+      // Fetch teams with member profiles (including skills)
       const { data: teamsData, error: teamsError } = await supabase
         .from('teams')
         .select(`
           *,
           team_members (
             user_id,
-            joined_at
+            joined_at,
+            profiles:user_id (
+              name,
+              skills
+            )
           )
         `)
         .eq('event_id', id)
@@ -184,23 +277,35 @@ function EventDetail() {
 
       if (teamsError) throw teamsError;
 
-      // Add member count to each team
-      const teamsWithCounts = (teamsData || []).map(team => ({
-        ...team,
-        member_count: team.team_members?.length || 0
-      }));
+      // Process teams data
+      const teamsWithDetails = (teamsData || []).map(team => {
+        // Flatten member data
+        const members = (team.team_members || []).map(tm => ({
+          user_id: tm.user_id,
+          joined_at: tm.joined_at,
+          name: tm.profiles?.name || 'Anonymous',
+          skills: tm.profiles?.skills || []
+        }));
 
-      setTeams(teamsWithCounts);
+        return {
+          ...team,
+          members,
+          member_count: members.length
+        };
+      });
+
+      setTeams(teamsWithDetails);
 
       // Check if user is in any team for this event
-      if (user && teamsData) {
-        const userTeamData = teamsData.find(team =>
-          team.team_members?.some(member => member.user_id === user.id)
+      if (user && teamsWithDetails) {
+        const userTeamData = teamsWithDetails.find(team =>
+          team.members?.some(member => member.user_id === user.id)
         );
         setUserTeam(userTeamData || null);
       }
     } catch (err) {
       console.error('Error fetching teams:', err);
+      // Don't set error state - this is non-critical data
     } finally {
       setTeamsLoading(false);
     }
@@ -313,6 +418,91 @@ function EventDetail() {
       console.error('Error leaving team:', err);
       setTeamError('Could not leave team. Please try again.');
       setTimeout(() => setTeamError(null), 5000);
+    }
+  };
+
+  // Edit Event Handlers
+  const handleEditClick = () => {
+    setEditFormData({
+      title: event.title,
+      description: event.description,
+      college: event.college,
+      category: event.category,
+      deadline: event.deadline,
+      required_skills: event.required_skills?.join(', ') || '',
+      allowed_college: event.allowed_college || '',
+      tags: event.tags?.join(', ') || ''
+    });
+    setIsEditing(true);
+  };
+
+  const handleUpdateEvent = async (e) => {
+    e.preventDefault();
+    setUpdating(true);
+    setError(null);
+
+    try {
+      const skills = editFormData.required_skills
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s);
+
+      const tags = editFormData.tags
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t);
+
+      const { error: updateError } = await supabase
+        .from('events')
+        .update({
+          title: editFormData.title,
+          description: editFormData.description,
+          college: editFormData.college,
+          category: editFormData.category,
+          deadline: editFormData.deadline,
+          required_skills: skills,
+          allowed_college: editFormData.allowed_college || null,
+          tags: tags.length > 0 ? tags : null
+        })
+        .eq('id', id);
+
+      if (updateError) throw updateError;
+
+      // Refresh event data
+      await fetchEvent();
+      setIsEditing(false);
+      setEditFormData(null);
+    } catch (err) {
+      console.error('Error updating event:', err);
+      setError('Failed to update event. Please try again.');
+      setTimeout(() => setError(null), 5000);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  // Delete Event Handler
+  const handleDeleteEvent = async () => {
+    setDeleting(true);
+    setError(null);
+
+    try {
+      const { error: deleteError } = await supabase
+        .from('events')
+        .delete()
+        .eq('id', id);
+
+      if (deleteError) throw deleteError;
+
+      // Redirect to events page
+      navigate('/events');
+    } catch (err) {
+      console.error('Error deleting event:', err);
+      setError('Failed to delete event. Please try again.');
+      setShowDeleteConfirm(false);
+      setTimeout(() => setError(null), 5000);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -462,19 +652,173 @@ function EventDetail() {
               {event.title}
             </h1>
 
+            {/* Edit/Delete Buttons - Only for event owner */}
+            {user && event && user.id === event.created_by && !isEditing && (
+              <div className="flex gap-3 mb-4">
+                <button
+                  onClick={handleEditClick}
+                  className="px-4 py-2 bg-white/20 backdrop-blur-sm text-white font-semibold rounded-lg hover:bg-white/30 transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                  Edit Event
+                </button>
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="px-4 py-2 bg-red-600/80 backdrop-blur-sm text-white font-semibold rounded-lg hover:bg-red-700 transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  Delete Event
+                </button>
+              </div>
+            )}
+
             <p className="text-lg text-white/90 leading-relaxed max-w-3xl">
               {event.description}
             </p>
           </div>
 
+          {/* Edit Form - Only shown when editing */}
+          {isEditing && editFormData && (
+            <div className="p-8 border-b border-gray-200 bg-gray-50">
+              <h3 className="text-2xl font-bold text-gray-900 mb-6">Edit Event</h3>
+              <form onSubmit={handleUpdateEvent} className="space-y-6">
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Title *</label>
+                    <input
+                      type="text"
+                      required
+                      value={editFormData.title}
+                      onChange={(e) => setEditFormData({ ...editFormData, title: e.target.value })}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">College *</label>
+                    <input
+                      type="text"
+                      required
+                      value={editFormData.college}
+                      onChange={(e) => setEditFormData({ ...editFormData, college: e.target.value })}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Category *</label>
+                    <select
+                      required
+                      value={editFormData.category}
+                      onChange={(e) => setEditFormData({ ...editFormData, category: e.target.value })}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    >
+                      <option value="Hackathon">Hackathon</option>
+                      <option value="Workshop">Workshop</option>
+                      <option value="Competition">Competition</option>
+                      <option value="Tech Talk">Tech Talk</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Deadline *</label>
+                    <input
+                      type="date"
+                      required
+                      value={editFormData.deadline}
+                      onChange={(e) => setEditFormData({ ...editFormData, deadline: e.target.value })}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Description *</label>
+                  <textarea
+                    required
+                    rows={4}
+                    value={editFormData.description}
+                    onChange={(e) => setEditFormData({ ...editFormData, description: e.target.value })}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Required Skills (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={editFormData.required_skills}
+                    onChange={(e) => setEditFormData({ ...editFormData, required_skills: e.target.value })}
+                    placeholder="e.g., React, Python, Machine Learning"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Tags (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={editFormData.tags}
+                    onChange={(e) => setEditFormData({ ...editFormData, tags: e.target.value })}
+                    placeholder="e.g., AI, Web Development, Innovation"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Restrict to College (Optional)</label>
+                  <input
+                    type="text"
+                    value={editFormData.allowed_college}
+                    onChange={(e) => setEditFormData({ ...editFormData, allowed_college: e.target.value })}
+                    placeholder="Leave empty for public event"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {editFormData.allowed_college ? (
+                      <span className="text-yellow-600">⚠️ Only students from {editFormData.allowed_college} will see this event</span>
+                    ) : (
+                      <span className="text-green-600">✓ Event is public to all colleges</span>
+                    )}
+                  </p>
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    type="submit"
+                    disabled={updating}
+                    className="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {updating ? 'Updating...' : 'Update Event'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditing(false);
+                      setEditFormData(null);
+                    }}
+                    disabled={updating}
+                    className="px-6 py-3 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
           {/* Event Details Grid */}
           <div className="p-8">
             <div className="grid md:grid-cols-2 gap-8 mb-8">
-              {/* Date & Time */}
+              {/* Deadline */}
               <div className="flex gap-4">
-                <div className="w-14 h-14 bg-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                <div className="w-14 h-14 bg-indigo-100 rounded-xl flex items-center justify-center flex-shrink-0">
                   <svg
-                    className="w-7 h-7 text-blue-600"
+                    className="w-7 h-7 text-indigo-600"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -488,41 +832,11 @@ function EventDetail() {
                   </svg>
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-gray-500 mb-1">Event Date</p>
-                  <p className="text-lg font-bold text-gray-900">{event.date}</p>
+                  <p className="text-sm font-semibold text-gray-500 mb-1">Registration Deadline</p>
+                  <p className="text-lg font-bold text-gray-900">{event.deadline}</p>
                 </div>
               </div>
 
-              {/* Location */}
-              {event.location && (
-                <div className="flex gap-4">
-                  <div className="w-14 h-14 bg-green-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                    <svg
-                      className="w-7 h-7 text-green-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
-                      />
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
-                      />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-gray-500 mb-1">Location</p>
-                    <p className="text-lg font-bold text-gray-900">{event.location}</p>
-                  </div>
-                </div>
-              )}
 
               {/* Organizer */}
               <div className="flex gap-4">
@@ -544,9 +858,6 @@ function EventDetail() {
                 <div>
                   <p className="text-sm font-semibold text-gray-500 mb-1">Organized By</p>
                   <p className="text-lg font-bold text-gray-900">{event.college}</p>
-                  {event.organizer_name && (
-                    <p className="text-sm text-gray-600 mt-1">{event.organizer_name}</p>
-                  )}
                 </div>
               </div>
 
@@ -574,30 +885,6 @@ function EventDetail() {
               </div>
             </div>
 
-            {/* Eligibility */}
-            {event.eligibility && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-8">
-                <div className="flex items-start gap-3">
-                  <svg
-                    className="w-6 h-6 text-blue-600 mt-0.5 flex-shrink-0"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                    />
-                  </svg>
-                  <div>
-                    <p className="text-sm font-bold text-blue-900 mb-1">Eligibility</p>
-                    <p className="text-blue-800">{event.eligibility}</p>
-                  </div>
-                </div>
-              </div>
-            )}
 
             {/* Tags */}
             {event.tags && event.tags.length > 0 && (
@@ -738,7 +1025,7 @@ function EventDetail() {
                   </button>
                 </div>
               </div>
-            ) : (
+            ) : isInterested ? (
               <div className="mb-6">
                 {!showCreateTeam ? (
                   <button
@@ -791,75 +1078,167 @@ function EventDetail() {
                   </div>
                 )}
               </div>
+            ) : null}
+
+            {/* Team Error Message */}
+            {teamError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-start gap-3">
+                <svg className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+                <p className="text-sm text-red-800">{teamError}</p>
+              </div>
             )}
 
-            {/* Teams List */}
-            {teamsLoading ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map(i => (
-                  <div key={i} className="bg-white rounded-xl border border-gray-200 p-6 animate-pulse">
-                    <div className="h-5 bg-gray-200 rounded w-1/3 mb-2"></div>
-                    <div className="h-4 bg-gray-200 rounded w-1/4"></div>
-                  </div>
-                ))}
+            {/* Team Discovery - Show compatible teams if user is interested but not in a team */}
+            {!userTeam && isInterested && !teamsLoading && teams.length > 0 && userProfile && (
+              <div className="mb-6">
+                <TeamDiscovery
+                  userProfile={userProfile}
+                  teams={teams}
+                  eventRequiredSkills={event?.required_skills || []}
+                  onJoinTeam={handleJoinTeam}
+                />
               </div>
-            ) : teams.length > 0 ? (
-              <div className="space-y-3">
-                {teams.map(team => (
-                  <div
-                    key={team.id}
-                    className={`bg-white rounded-xl border p-6 transition-all ${userTeam?.id === team.id
-                      ? 'border-emerald-300 bg-emerald-50'
-                      : 'border-gray-200 hover:border-indigo-300 hover:shadow-md'
-                      }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1">
-                        <h4 className="text-lg font-bold text-gray-900 mb-1">{team.name}</h4>
-                        <div className="flex items-center gap-4 text-sm text-gray-600">
-                          <span className="flex items-center gap-1">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                            </svg>
-                            {team.member_count} {team.member_count === 1 ? 'member' : 'members'}
-                          </span>
-                        </div>
+            )}
+
+            {/* Teams List - ONLY visible to interested users */}
+            {isInterested && (
+              <>
+                {teamsLoading ? (
+                  <div className="space-y-3">
+                    {[1, 2, 3].map(i => (
+                      <div key={i} className="bg-white rounded-xl border border-gray-200 p-6 animate-pulse">
+                        <div className="h-5 bg-gray-200 rounded w-1/3 mb-2"></div>
+                        <div className="h-4 bg-gray-200 rounded w-1/4"></div>
                       </div>
-                      {!userTeam && user && (
-                        <button
-                          onClick={() => handleJoinTeam(team.id)}
-                          className="px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors"
-                        >
-                          Join Team
-                        </button>
-                      )}
-                      {userTeam?.id === team.id && (
-                        <span className="px-4 py-2 bg-emerald-100 text-emerald-700 font-semibold rounded-lg text-sm">
-                          Your Team
-                        </span>
-                      )}
-                    </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
-                <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                ) : teams.length > 0 ? (
+                  <div className="space-y-3">
+                    {teams.map(team => (
+                      <div
+                        key={team.id}
+                        className={`bg-white rounded-xl border p-6 transition-all ${userTeam?.id === team.id
+                          ? 'border-emerald-300 bg-emerald-50'
+                          : 'border-gray-200 hover:border-indigo-300 hover:shadow-md'
+                          }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex-1">
+                            <h4 className="text-lg font-bold text-gray-900 mb-1">{team.name}</h4>
+                            <div className="flex items-center gap-4 text-sm text-gray-600">
+                              <span className="flex items-center gap-1">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                                </svg>
+                                {team.member_count} {team.member_count === 1 ? 'member' : 'members'}
+                              </span>
+                            </div>
+                          </div>
+                          {!userTeam && user && (
+                            <button
+                              onClick={() => handleJoinTeam(team.id)}
+                              className="px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors"
+                            >
+                              Join Team
+                            </button>
+                          )}
+                          {userTeam?.id === team.id && (
+                            <span className="px-4 py-2 bg-emerald-100 text-emerald-700 font-semibold rounded-lg text-sm">
+                              Your Team
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Team Fit Analysis - Only show if not in a team */}
+                        {!userTeam && user && (
+                          <TeamFit
+                            userSkills={userProfile?.skills || []}
+                            teamMembers={team.members || []}
+                            eventRequiredSkills={event?.required_skills || []}
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                    <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                      </svg>
+                    </div>
+                    <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                      No Teams Yet
+                    </h3>
+                    <p className="text-gray-600 mb-6">
+                      Be the first to create a team for this event
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Message for non-interested users */}
+            {!isInterested && (
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-8 text-center">
+                <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 </div>
                 <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                  No Teams Yet
+                  Mark Your Interest First
                 </h3>
-                <p className="text-gray-600 mb-6">
-                  Be the first to create a team for this event
+                <p className="text-gray-600">
+                  To view and join teams, please mark your interest in this event above
                 </p>
               </div>
             )}
           </div>
         </div>
       </main>
+
+      {/* Delete Confirmation Dialog */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-start gap-4 mb-4">
+              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center flex-shrink-0">
+                <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-xl font-bold text-gray-900 mb-2">Delete Event?</h3>
+                <p className="text-gray-600 mb-1">
+                  This action cannot be undone. The event will be permanently deleted.
+                </p>
+                <p className="text-sm text-red-600 font-semibold">
+                  All teams and interest data will be lost.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleDeleteEvent}
+                disabled={deleting}
+                className="flex-1 px-4 py-3 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {deleting ? 'Deleting...' : 'Delete Event'}
+              </button>
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={deleting}
+                className="flex-1 px-4 py-3 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

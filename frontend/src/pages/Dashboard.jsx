@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import Navbar from '../components/Navbar.jsx';
 import { supabase } from '../lib/supabase.js';
+import { useCountUp } from '../hooks/useCountUp.js';
 
 function Dashboard() {
   const navigate = useNavigate();
@@ -26,6 +28,11 @@ function Dashboard() {
 
   // Profile completeness
   const [profileCompleteness, setProfileCompleteness] = useState(0);
+
+  // Animated counters for stats
+  const animatedActiveEvents = useCountUp(stats.activeEvents, 1500);
+  const animatedDeadlines = useCountUp(stats.deadlinesThisWeek, 1500);
+  const animatedColleges = useCountUp(stats.partnerColleges, 1500);
 
   useEffect(() => {
     // Check if this is the user's first login
@@ -57,7 +64,7 @@ function Dashboard() {
       // Fetch user profile using user_id column
       const { data: profileData, error: profileError } = await supabase
         .from('profiles')
-        .select('name, college, year, skills')
+        .select('name, college, year, skills, role')
         .eq('user_id', user.id)
         .maybeSingle();
 
@@ -65,17 +72,29 @@ function Dashboard() {
         console.error('Error fetching profile for dashboard:', profileError);
       }
 
+      console.log('USER ROLE:', profileData?.role); // Debug log
+
       setProfile(profileData);
 
       // Calculate profile completeness
       const completeness = calculateProfileCompleteness(profileData);
       setProfileCompleteness(completeness);
 
-      // Fetch all active events with required_skills
-      const { data: events, error } = await supabase
+      // Fetch all active events with visibility filtering
+      let query = supabase
         .from('events')
-        .select('*')
-        .order('deadline', { ascending: true });
+        .select('*');
+
+      // Apply visibility filter based on user's college
+      if (profile?.college) {
+        // Show: public events OR events for user's college
+        query = query.or(`allowed_college.is.null,allowed_college.eq.${profile.college}`);
+      } else {
+        // No college = only public events
+        query = query.is('allowed_college', null);
+      }
+
+      const { data: events, error } = await query.order('deadline', { ascending: true });
 
       if (error) throw error;
 
@@ -86,7 +105,7 @@ function Dashboard() {
 
       // Filter and score events
       const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      today.setHours(0, 0, 0);
 
       const scoredEvents = events
         .filter(event => {
@@ -132,23 +151,8 @@ function Dashboard() {
             score += 100;
           }
 
-          // PRIORITY 3: Eligibility match
-          if (profileData?.year && event.eligibility) {
-            const eligibilityLower = event.eligibility.toLowerCase();
-            const yearLower = profileData.year.toLowerCase();
 
-            // Check if eligibility mentions the user's year or "open to all"
-            if (
-              eligibilityLower.includes(yearLower) ||
-              eligibilityLower.includes('open to all') ||
-              eligibilityLower.includes('all students')
-            ) {
-              reasons.push('Eligible for your year');
-              score += 50;
-            }
-          }
-
-          // PRIORITY 4: Deadline urgency (closer deadline = higher score)
+          // PRIORITY 3: Deadline urgency (closer deadline = higher score)
           const deadlineDate = parseDeadlineDate(event.deadline);
           if (deadlineDate) {
             const daysUntilDeadline = Math.ceil((deadlineDate - today) / (1000 * 60 * 60 * 24));
@@ -406,46 +410,8 @@ function Dashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
-      {/* Header Navigation */}
-      <header className="bg-white border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 flex items-center justify-center">
-                <img
-                  src="/logo.png"
-                  alt="Anveshan Logo"
-                  className="w-8 h-8 object-contain"
-                />
-              </div>
-
-              <h1 className="text-xl font-bold text-gray-900">
-                Anveshan
-              </h1>
-            </div>
-            <nav className="flex items-center gap-6">
-              <button
-                onClick={() => navigate('/events')}
-                className="text-sm font-medium text-gray-700 hover:text-blue-600 transition-colors"
-              >
-                Events
-              </button>
-              <button
-                onClick={() => navigate('/profile')}
-                className="text-sm font-medium text-gray-700 hover:text-blue-600 transition-colors"
-              >
-                Profile
-              </button>
-              <button
-                onClick={handleLogout}
-                className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
-              >
-                Logout
-              </button>
-            </nav>
-          </div>
-        </div>
-      </header>
+      {/* Navbar */}
+      <Navbar />
 
       {/* Onboarding Banner for First-Time Users */}
       {showOnboarding && (
@@ -504,40 +470,40 @@ function Dashboard() {
           {/* Active Events Stat */}
           <StatCard
             loading={statsLoading}
-            value={stats.activeEvents}
+            value={animatedActiveEvents}
             label="Active Events"
             icon={
-              <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
               </svg>
             }
-            bgColor="bg-blue-100"
+            gradient="from-indigo-50 to-indigo-100"
           />
 
           {/* Deadlines This Week Stat */}
           <StatCard
             loading={statsLoading}
-            value={stats.deadlinesThisWeek}
+            value={animatedDeadlines}
             label="Deadlines This Week"
             icon={
-              <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             }
-            bgColor="bg-red-100"
+            gradient="from-emerald-50 to-emerald-100"
           />
 
           {/* Partner Colleges Stat */}
           <StatCard
             loading={statsLoading}
-            value={stats.partnerColleges}
+            value={animatedColleges}
             label="Partner Colleges"
             icon={
-              <svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
             }
-            bgColor="bg-purple-100"
+            gradient="from-blue-50 to-blue-100"
           />
         </div>
 
@@ -577,50 +543,73 @@ function Dashboard() {
             </div>
           ) : recommendedEvents.length > 0 ? (
             <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {recommendedEvents.map(event => (
-                <div
-                  key={event.id}
-                  onClick={() => navigate(`/events/${event.id}`)}
-                  className="bg-white rounded-xl border border-gray-200 p-6 hover:shadow-lg hover:border-indigo-300 transition-all cursor-pointer group"
-                >
-                  {/* Event Title */}
-                  <h4 className="font-bold text-gray-900 mb-2 line-clamp-2 group-hover:text-indigo-600 transition-colors">
-                    {event.title}
-                  </h4>
+              {recommendedEvents.map(event => {
+                // Category color mapping
+                const categoryColors = {
+                  'Hackathon': 'border-l-4 border-purple-500',
+                  'Workshop': 'border-l-4 border-blue-500',
+                  'Competition': 'border-l-4 border-orange-500',
+                  'Tech Talk': 'border-l-4 border-green-500'
+                };
+                const categoryBorder = categoryColors[event.category] || 'border-l-4 border-gray-300';
 
-                  {/* College */}
-                  <p className="text-sm text-gray-600 mb-3 line-clamp-1">
-                    {event.college}
-                  </p>
+                return (
+                  <div
+                    key={event.id}
+                    onClick={() => navigate(`/events/${event.id}`)}
+                    className={`bg-white rounded-xl border border-gray-200 ${categoryBorder} p-6 hover:shadow-lg hover:border-indigo-300 transition-all duration-200 hover:scale-[1.02] cursor-pointer group relative`}
+                  >
+                    {/* Popular Badge */}
+                    {event.interest_count && event.interest_count > 10 && (
+                      <div className="absolute top-4 right-4 bg-yellow-100 text-yellow-700 text-xs font-bold px-2 py-1 rounded-full flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                        </svg>
+                        Popular
+                      </div>
+                    )}
 
-                  {/* Why This Event? */}
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {event.reasons.map((reason, index) => (
-                      <span
-                        key={index}
-                        className={`text-xs font-semibold px-2 py-1 rounded-full ${reason === 'From your college'
-                          ? 'bg-indigo-100 text-indigo-700'
-                          : reason === 'Eligible for your year'
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : reason === 'Deadline this week'
-                              ? 'bg-red-100 text-red-700'
-                              : 'bg-gray-100 text-gray-600'
-                          }`}
-                      >
-                        {reason}
-                      </span>
-                    ))}
+                    {/* Event Title */}
+                    <h4 className="font-bold text-gray-900 mb-2 line-clamp-2 group-hover:text-indigo-600 transition-colors">
+                      {event.title}
+                    </h4>
+
+                    {/* College */}
+                    <p className="text-sm text-gray-600 mb-3 line-clamp-1">
+                      {event.college}
+                    </p>
+
+                    {/* Why This Event? */}
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {event.reasons.map((reason, index) => (
+                        <span
+                          key={index}
+                          className={`text-xs font-semibold px-2 py-1 rounded-full ${reason.startsWith('Matches your skill')
+                            ? 'bg-indigo-100 text-indigo-700'
+                            : reason === 'From your college'
+                              ? 'bg-indigo-100 text-indigo-700'
+                              : reason === 'Eligible for your year'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : reason === 'Deadline this week'
+                                  ? 'bg-red-100 text-red-700'
+                                  : 'bg-gray-100 text-gray-600'
+                            }`}
+                        >
+                          {reason}
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Deadline */}
+                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      Deadline: {event.deadline}
+                    </div>
                   </div>
-
-                  {/* Deadline */}
-                  <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    Deadline: {event.deadline}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
@@ -723,31 +712,31 @@ function Dashboard() {
 }
 
 // Stat Card Component
-function StatCard({ loading, value, label, icon, bgColor }) {
+function StatCard({ loading, value, label, icon, gradient }) {
   if (loading) {
     return (
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 animate-pulse">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 animate-pulse">
         <div className="flex items-center justify-between">
           <div className="flex-1">
             <div className="h-4 bg-gray-200 rounded w-24 mb-2"></div>
             <div className="h-8 bg-gray-200 rounded w-16"></div>
           </div>
-          <div className={`w-12 h-12 ${bgColor} rounded-lg`}></div>
+          <div className="w-12 h-12 bg-gray-200 rounded-lg"></div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 hover:shadow-md transition-shadow">
+    <div className={`bg-gradient-to-br ${gradient} rounded-xl border border-gray-200 shadow-sm p-6 transition-all duration-300 ease-out hover:-translate-y-1 hover:shadow-xl cursor-default`}>
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-sm font-medium text-gray-500 mb-1">
+          <p className="text-sm font-semibold text-gray-600 mb-1">
             {label}
           </p>
-          <p className="text-3xl font-bold text-gray-900">{value}</p>
+          <p className="text-4xl font-bold text-gray-900">{value}</p>
         </div>
-        <div className={`w-12 h-12 ${bgColor} rounded-lg flex items-center justify-center`}>
+        <div className="w-14 h-14 bg-white/80 backdrop-blur-sm rounded-xl flex items-center justify-center shadow-sm">
           {icon}
         </div>
       </div>

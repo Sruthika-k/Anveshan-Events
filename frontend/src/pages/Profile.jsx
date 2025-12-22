@@ -18,7 +18,10 @@ function Profile() {
     name: '',
     college: '',
     year: '',
-    skills: [] // Changed to array for tag-based input
+    skills: [], // Changed to array for tag-based input
+    role: 'student', // Read-only, not editable
+    linkedin_url: '',
+    github_url: ''
   });
 
   useEffect(() => {
@@ -67,7 +70,10 @@ function Profile() {
             name: profileData.name || '',
             college: profileData.college || '',
             year: profileData.year || '',
-            skills: Array.isArray(profileData.skills) ? profileData.skills : [] // Ensure array
+            skills: Array.isArray(profileData.skills) ? profileData.skills : [], // Ensure array
+            role: profileData.role || 'student',
+            linkedin_url: profileData.linkedin_url || '',
+            github_url: profileData.github_url || ''
           });
         } else {
           console.log('No profile found for user, will create on save');
@@ -316,6 +322,19 @@ function Profile() {
                 </select>
               </div>
 
+              {/* Role - Read-Only */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Account Type
+                </label>
+                <div className="w-full px-4 py-3 border border-gray-200 rounded-xl bg-gray-50 text-gray-700 font-medium">
+                  {formData.role === 'organizer' ? 'Organizer' : 'Student'}
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Account type is set during signup and cannot be changed.
+                </p>
+              </div>
+
               {/* Skills */}
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -324,6 +343,38 @@ function Profile() {
                 <SkillTagsInput
                   value={formData.skills}
                   onChange={(newSkills) => setFormData(prev => ({ ...prev, skills: newSkills }))}
+                />
+              </div>
+
+              {/* LinkedIn URL */}
+              <div>
+                <label htmlFor="linkedin_url" className="block text-sm font-semibold text-gray-700 mb-2">
+                  LinkedIn Profile (Optional)
+                </label>
+                <input
+                  type="url"
+                  id="linkedin_url"
+                  name="linkedin_url"
+                  value={formData.linkedin_url}
+                  onChange={handleInputChange}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
+                  placeholder="https://linkedin.com/in/yourprofile"
+                />
+              </div>
+
+              {/* GitHub URL */}
+              <div>
+                <label htmlFor="github_url" className="block text-sm font-semibold text-gray-700 mb-2">
+                  GitHub Profile (Optional)
+                </label>
+                <input
+                  type="url"
+                  id="github_url"
+                  name="github_url"
+                  value={formData.github_url}
+                  onChange={handleInputChange}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
+                  placeholder="https://github.com/yourusername"
                 />
               </div>
 
@@ -474,6 +525,20 @@ function Profile() {
                   <div className="flex-1">
                     <p className="text-sm font-semibold text-gray-500 mb-1">Email Address</p>
                     <p className="text-base font-medium text-gray-900">{user?.email}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-xl">
+                  <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold text-gray-500 mb-1">Account Type</p>
+                    <p className="text-base font-medium text-gray-900">
+                      {profile?.role === 'organizer' ? 'Organizer' : 'Student'}
+                    </p>
                   </div>
                 </div>
 

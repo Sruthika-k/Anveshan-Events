@@ -2,26 +2,61 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Navbar from '../components/Navbar.jsx';
 import { supabase } from '../lib/supabase.js';
+import { useAuth } from '../hooks/useAuth.js';
 
 function Events() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [userCollege, setUserCollege] = useState(null);
 
   useEffect(() => {
-    fetchEvents();
-  }, []);
+    if (user) {
+      fetchUserProfile();
+    } else {
+      fetchEvents(null);
+    }
+  }, [user]);
 
-  const fetchEvents = async () => {
+  const fetchUserProfile = async () => {
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('college')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      const college = data?.college || null;
+      setUserCollege(college);
+      fetchEvents(college);
+    } catch (err) {
+      console.error('Error fetching profile:', err);
+      fetchEvents(null);
+    }
+  };
+
+  const fetchEvents = async (college) => {
     try {
       setLoading(true);
       setError(null);
 
-      const { data, error: fetchError } = await supabase
+      // Build query with visibility filter
+      let query = supabase
         .from('events')
-        .select('*')
-        .order('created_at', { ascending: false });
+        .select('*');
+
+      // Apply visibility filter
+      if (college) {
+        // Show: public events OR events for user's college
+        query = query.or(`allowed_college.is.null,allowed_college.eq.${college}`);
+      } else {
+        // No college = only public events
+        query = query.is('allowed_college', null);
+      }
+
+      const { data, error: fetchError } = await query.order('created_at', { ascending: false });
 
       if (fetchError) throw fetchError;
 
@@ -163,7 +198,8 @@ function Events() {
                       </span>
                     </div>
 
-                    {/* Date */}
+
+                    {/* Deadline */}
                     <div className="flex items-center gap-2 mb-4 text-gray-700">
                       <svg
                         className="w-4 h-4 text-gray-400 flex-shrink-0"
@@ -179,7 +215,7 @@ function Events() {
                         />
                       </svg>
                       <span className="text-sm font-medium">
-                        {event.date}
+                        Deadline: {event.deadline}
                       </span>
                     </div>
 
@@ -243,10 +279,12 @@ function Events() {
               No Events Available
             </h3>
             <p className="text-gray-500 mb-6">
-              Check back soon for new opportunities from top colleges
+              {userCollege
+                ? `No events available for ${userCollege} right now. Check back soon for new opportunities!`
+                : 'No public events available right now. Add your college to your profile to see college-specific events.'}
             </p>
             <button
-              onClick={fetchEvents}
+              onClick={() => fetchEvents(userCollege)}
               className="px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
             >
               Refresh

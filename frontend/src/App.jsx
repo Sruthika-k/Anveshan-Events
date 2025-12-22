@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard.jsx';
 import Events from './pages/Events.jsx';
 import EventDetail from './pages/EventDetail.jsx';
 import Profile from './pages/Profile.jsx';
+import OrganizerDashboard from './pages/OrganizerDashboard.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 
 function App() {
@@ -45,6 +46,14 @@ function App() {
         element={
           <ProtectedRoute>
             <Profile />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/organizer"
+        element={
+          <ProtectedRoute>
+            <OrganizerDashboard />
           </ProtectedRoute>
         }
       />

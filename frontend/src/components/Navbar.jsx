@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase.js';
+import { useAuth } from '../hooks/useAuth.js';
 
 function Navbar() {
     const navigate = useNavigate();
     const location = useLocation();
+    const { user, role, roleLoading } = useAuth(); // Use centralized role from useAuth
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [loggingOut, setLoggingOut] = useState(false);
 
@@ -30,11 +32,17 @@ function Navbar() {
 
     const isActive = (path) => location.pathname === path;
 
+    // Base nav links
     const navLinks = [
         { path: '/dashboard', label: 'Dashboard' },
         { path: '/events', label: 'Events' },
         { path: '/profile', label: 'Profile' }
     ];
+
+    // Add organizer link ONLY if role is loaded AND user is organizer
+    if (!roleLoading && role === 'organizer') {
+        navLinks.splice(2, 0, { path: '/organizer', label: 'Organizer' });
+    }
 
     return (
         <header className="bg-white border-b border-gray-200 sticky top-0 z-50 backdrop-blur-sm bg-white/95">
@@ -62,8 +70,8 @@ function Navbar() {
                                 key={link.path}
                                 onClick={() => navigate(link.path)}
                                 className={`text-sm font-medium transition-colors ${isActive(link.path)
-                                        ? 'text-indigo-600'
-                                        : 'text-gray-700 hover:text-indigo-600'
+                                    ? 'text-indigo-600'
+                                    : 'text-gray-700 hover:text-indigo-600'
                                     }`}
                             >
                                 {link.label}
@@ -108,8 +116,8 @@ function Navbar() {
                                         setMobileMenuOpen(false);
                                     }}
                                     className={`text-left px-4 py-2 rounded-lg text-sm font-medium transition-colors ${isActive(link.path)
-                                            ? 'bg-indigo-50 text-indigo-600'
-                                            : 'text-gray-700 hover:bg-gray-50'
+                                        ? 'bg-indigo-50 text-indigo-600'
+                                        : 'text-gray-700 hover:bg-gray-50'
                                         }`}
                                 >
                                     {link.label}

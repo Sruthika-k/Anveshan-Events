@@ -5,18 +5,61 @@ export function useAuth() {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [role, setRole] = useState(null);
+    const [roleLoading, setRoleLoading] = useState(true);
+
+    // Fetch user role from profiles table
+    const fetchUserRole = async (userId) => {
+        if (!userId) {
+            setRole(null);
+            setRoleLoading(false);
+            return;
+        }
+
+        try {
+            setRoleLoading(true);
+            const { data, error } = await supabase
+                .from('profiles')
+                .select('role')
+                .eq('user_id', userId)
+                .maybeSingle();
+
+            if (error) {
+                console.error('Error fetching user role:', error);
+                setRole(null);
+            } else {
+                setRole(data?.role || null);
+            }
+        } catch (err) {
+            console.error('Error in fetchUserRole:', err);
+            setRole(null);
+        } finally {
+            setRoleLoading(false);
+        }
+    };
 
     useEffect(() => {
         // Check active session on mount
         const checkSession = async () => {
             try {
                 const { data: { session } } = await supabase.auth.getSession();
-                setUser(session?.user ?? null);
-                setIsAuthenticated(!!session?.user);
+                const currentUser = session?.user ?? null;
+                setUser(currentUser);
+                setIsAuthenticated(!!currentUser);
+
+                // Fetch role if user exists
+                if (currentUser) {
+                    await fetchUserRole(currentUser.id);
+                } else {
+                    setRole(null);
+                    setRoleLoading(false);
+                }
             } catch (error) {
                 console.error('Error checking session:', error);
                 setUser(null);
                 setIsAuthenticated(false);
+                setRole(null);
+                setRoleLoading(false);
             } finally {
                 setLoading(false);
             }
@@ -27,10 +70,18 @@ export function useAuth() {
         // Listen for auth state changes
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
             async (event, session) => {
-                console.log('Auth state changed:', event);
-                setUser(session?.user ?? null);
-                setIsAuthenticated(!!session?.user);
+                const currentUser = session?.user ?? null;
+                setUser(currentUser);
+                setIsAuthenticated(!!currentUser);
                 setLoading(false);
+
+                // Fetch role on auth state change
+                if (currentUser) {
+                    await fetchUserRole(currentUser.id);
+                } else {
+                    setRole(null);
+                    setRoleLoading(false);
+                }
             }
         );
 
@@ -44,5 +95,7 @@ export function useAuth() {
         user,
         loading,
         isAuthenticated,
+        role,
+        roleLoading,
     };
 }
