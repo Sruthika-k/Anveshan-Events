@@ -1,11 +1,25 @@
+import { useAuth } from "../hooks/useAuth";
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { differenceInDays, parseISO } from 'date-fns';
 import Navbar from '../components/Navbar.jsx';
+import EventHeatmap from '../components/EventHeatmap.jsx';
+import SkillMatchBar from '../components/SkillMatchBar.jsx';
 import { supabase } from '../lib/supabase.js';
 import { useCountUp } from '../hooks/useCountUp.js';
+import {
+  rankRecommendations,
+  getMatchQuality,
+  getMatchColors,
+  calculateSkillMatch
+} from '../utils/recommendationScore.js';
 
 function Dashboard() {
   const navigate = useNavigate();
+
+  // Defensive guard: prevent crash if useAuth is undefined
+  const authHook = useAuth?.() || { user: null, profile: null, profileLoading: false };
+  const { user, profile: cachedProfile, profileLoading: cachedProfileLoading } = authHook;
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   // Stats state
@@ -34,6 +48,7 @@ function Dashboard() {
   const animatedDeadlines = useCountUp(stats.deadlinesThisWeek, 1500);
   const animatedColleges = useCountUp(stats.partnerColleges, 1500);
 
+  // PERFORMANCE: Proper dependency arrays
   useEffect(() => {
     // Check if this is the user's first login
     const isFirstLogin = localStorage.getItem('isFirstLogin');
@@ -41,9 +56,17 @@ function Dashboard() {
       setShowOnboarding(true);
     }
 
-    // Fetch stats and personalized feed
-    fetchDashboardData();
-  }, []);
+    // Fetch stats once on mount
+    fetchDashboardStats();
+  }, []); // Run once on mount
+
+  // Fetch personalized feed when user is available
+  useEffect(() => {
+    if (user) {
+      fetchPersonalizedFeed();
+      fetchSavedEvents();
+    }
+  }, [user?.id]); // Re-fetch when user changes
 
   const fetchDashboardData = async () => {
     await Promise.all([
@@ -57,26 +80,39 @@ function Dashboard() {
     try {
       setEventsLoading(true);
 
-      // Get current user
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      // Fetch user profile using user_id column
-      const { data: profileData, error: profileError } = await supabase
-        .from('profiles')
-        .select('name, college, year, skills, role')
-        .eq('user_id', user.id)
-        .maybeSingle();
-
-      if (profileError) {
-        console.error('Error fetching profile for dashboard:', profileError);
+      // GUARD: If no user, load nothing
+      if (!user) {
+        setRecommendedEvents([]);
+        setEventsLoading(false);
+        return;
       }
 
-      console.log('USER ROLE:', profileData?.role); // Debug log
-
+      // Profile can be null - that's OK, we'll show generic events
+      // Fetch profile if not already available
+      let profileData = cachedProfile;
+      if (!profileData && user) {
+        try {
+          const { data, error: profileError } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', user.id)
+            .maybeSingle();
+          
+          if (profileError) {
+            console.error('Error fetching profile:', profileError);
+            profileData = null;
+          } else {
+            profileData = data || null;
+          }
+        } catch (err) {
+          console.error('Error in profile fetch:', err);
+          profileData = null;
+        }
+      }
+      
       setProfile(profileData);
 
-      // Calculate profile completeness
+      // Calculate profile completeness (safe with null)
       const completeness = calculateProfileCompleteness(profileData);
       setProfileCompleteness(completeness);
 
@@ -85,21 +121,29 @@ function Dashboard() {
         .from('events')
         .select('*');
 
-      // Apply visibility filter based on user's college
-      if (profile?.college) {
+      // RULE 1: If profile is null → fetch public events
+      // RULE 2: If profile.college is null → fetch public events
+      // RULE 3: Only apply college filter if college exists
+      if (profileData?.college) {
         // Show: public events OR events for user's college
-        query = query.or(`allowed_college.is.null,allowed_college.eq.${profile.college}`);
+        query = query.or(`allowed_college.is.null,allowed_college.eq.${profileData.college}`);
       } else {
-        // No college = only public events
+        // No profile or no college = only public events
         query = query.is('allowed_college', null);
       }
 
       const { data: events, error } = await query.order('deadline', { ascending: true });
 
-      if (error) throw error;
+      if (error) {
+        console.error('Error fetching events:', error);
+        setRecommendedEvents([]);
+        setEventsLoading(false);
+        return;
+      }
 
       if (!events || events.length === 0) {
         setRecommendedEvents([]);
+        setEventsLoading(false);
         return;
       }
 
@@ -181,7 +225,9 @@ function Dashboard() {
         .sort((a, b) => b.score - a.score)  // Sort by score (highest first)
         .slice(0, 6);  // Show top 6 recommendations
 
-      setRecommendedEvents(scoredEvents);
+      // Use smart ranking algorithm
+      const rankedEvents = rankRecommendations(scoredEvents, profileData);
+      setRecommendedEvents(rankedEvents);
     } catch (err) {
       console.error('Error fetching personalized feed:', err);
       setRecommendedEvents([]);
@@ -507,6 +553,14 @@ function Dashboard() {
           />
         </div>
 
+        {/* Event Activity Heatmap */}
+        <div className="mb-12">
+          <EventHeatmap
+            events={recommendedEvents}
+            loading={eventsLoading}
+          />
+        </div>
+
         {/* Personalized Event Feed */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-6">
@@ -542,70 +596,122 @@ function Dashboard() {
               ))}
             </div>
           ) : recommendedEvents.length > 0 ? (
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {recommendedEvents.map(event => {
-                // Category color mapping
-                const categoryColors = {
-                  'Hackathon': 'border-l-4 border-purple-500',
-                  'Workshop': 'border-l-4 border-blue-500',
-                  'Competition': 'border-l-4 border-orange-500',
-                  'Tech Talk': 'border-l-4 border-green-500'
-                };
-                const categoryBorder = categoryColors[event.category] || 'border-l-4 border-gray-300';
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {recommendedEvents.slice(0, 6).map(event => {
+                const skillMatch = calculateSkillMatch(profile?.skills, event?.required_skills);
+                const matchColors = getMatchColors(event.recommendationScore || skillMatch);
+                const matchQuality = getMatchQuality(event.recommendationScore || skillMatch);
+                const daysUntil = event.deadline ? differenceInDays(parseISO(event.deadline), new Date()) : null;
+                const isPerfectMatch = (event.recommendationScore || skillMatch) >= 90;
 
                 return (
                   <div
                     key={event.id}
                     onClick={() => navigate(`/events/${event.id}`)}
-                    className={`bg-white rounded-xl border border-gray-200 ${categoryBorder} p-6 hover:shadow-lg hover:border-indigo-300 transition-all duration-200 hover:scale-[1.02] cursor-pointer group relative`}
+                    className={`bg-white rounded-2xl border-2 p-6 hover:shadow-2xl transition-all duration-300 hover:-translate-y-1 cursor-pointer group relative overflow-hidden ${(event.recommendationScore || skillMatch) >= 80 ? matchColors.border : 'border-gray-200'
+                      } ${(event.recommendationScore || skillMatch) >= 80 ? matchColors.ring : ''}`}
                   >
-                    {/* Popular Badge */}
-                    {event.interest_count && event.interest_count > 10 && (
-                      <div className="absolute top-4 right-4 bg-yellow-100 text-yellow-700 text-xs font-bold px-2 py-1 rounded-full flex items-center gap-1">
-                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                        </svg>
-                        Popular
-                      </div>
+                    {/* Gradient Overlay for High Matches */}
+                    {(event.recommendationScore || skillMatch) >= 80 && (
+                      <div className="absolute inset-0 bg-gradient-to-br from-green-50/50 to-emerald-50/50 pointer-events-none"></div>
                     )}
 
-                    {/* Event Title */}
-                    <h4 className="font-bold text-gray-900 mb-2 line-clamp-2 group-hover:text-indigo-600 transition-colors">
-                      {event.title}
-                    </h4>
+                    {/* Content */}
+                    <div className="relative z-10">
+                      {/* Match Score Badge */}
+                      <div className="flex items-start justify-between mb-4">
+                        <div className={`px-4 py-2 rounded-xl font-bold text-sm shadow-lg ${matchColors.badge
+                          } ${isPerfectMatch ? 'animate-pulse-slow' : ''}`}>
+                          <div className="flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                            </svg>
+                            <span>{event.recommendationScore || skillMatch}% Match</span>
+                          </div>
+                          <div className="text-xs font-normal opacity-90 mt-0.5">
+                            {matchQuality}
+                          </div>
+                        </div>
 
-                    {/* College */}
-                    <p className="text-sm text-gray-600 mb-3 line-clamp-1">
-                      {event.college}
-                    </p>
-
-                    {/* Why This Event? */}
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {event.reasons.map((reason, index) => (
-                        <span
-                          key={index}
-                          className={`text-xs font-semibold px-2 py-1 rounded-full ${reason.startsWith('Matches your skill')
-                            ? 'bg-indigo-100 text-indigo-700'
-                            : reason === 'From your college'
-                              ? 'bg-indigo-100 text-indigo-700'
-                              : reason === 'Eligible for your year'
-                                ? 'bg-emerald-100 text-emerald-700'
-                                : reason === 'Deadline this week'
-                                  ? 'bg-red-100 text-red-700'
-                                  : 'bg-gray-100 text-gray-600'
-                            }`}
-                        >
-                          {reason}
+                        {/* Category Badge */}
+                        <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg">
+                          {event.category}
                         </span>
-                      ))}
-                    </div>
+                      </div>
 
-                    {/* Deadline */}
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      Deadline: {event.deadline}
+                      {/* Event Title */}
+                      <h4 className="font-bold text-lg text-gray-900 mb-2 line-clamp-2 group-hover:text-indigo-600 transition-colors">
+                        {event.title}
+                      </h4>
+
+                      {/* College */}
+                      <p className="text-sm text-gray-600 mb-4 flex items-center gap-2">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                        </svg>
+                        {event.college}
+                      </p>
+
+                      {/* Skill Match Visualization */}
+                      <div className="mb-4 p-4 bg-gray-50 rounded-xl">
+                        <SkillMatchBar
+                          userSkills={profile?.skills || []}
+                          requiredSkills={event?.required_skills || []}
+                          matchPercentage={skillMatch}
+                        />
+                      </div>
+
+                      {/* Why This Event? */}
+                      <div className="space-y-2 mb-4">
+                        <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+                          Why Recommended?
+                        </p>
+                        <div className="space-y-1.5">
+                          {/* Skill Match */}
+                          {skillMatch > 0 && (
+                            <div className="flex items-center gap-2 text-sm text-gray-700">
+                              <svg className="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                              </svg>
+                              <span className="text-xs">
+                                You have {event.required_skills?.filter(skill =>
+                                  profile?.skills?.map(s => s.toLowerCase()).includes(skill.toLowerCase())
+                                ).length || 0}/{event.required_skills?.length || 0} required skills
+                              </span>
+                            </div>
+                          )}
+
+                          {/* College Match */}
+                          {profile?.college && event.college === profile.college && (
+                            <div className="flex items-center gap-2 text-sm text-gray-700">
+                              <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M10.394 2.08a1 1 0 00-.788 0l-7 3a1 1 0 000 1.84L5.25 8.051a.999.999 0 01.356-.257l4-1.714a1 1 0 11.788 1.838L7.667 9.088l1.94.831a1 1 0 00.787 0l7-3a1 1 0 000-1.838l-7-3zM3.31 9.397L5 10.12v4.102a8.969 8.969 0 00-1.05-.174 1 1 0 01-.89-.89 11.115 11.115 0 01.25-3.762zM9.3 16.573A9.026 9.026 0 007 14.935v-3.957l1.818.78a3 3 0 002.364 0l5.508-2.361a11.026 11.026 0 01.25 3.762 1 1 0 01-.89.89 8.968 8.968 0 00-5.35 2.524 1 1 0 01-1.4 0zM6 18a1 1 0 001-1v-2.065a8.935 8.935 0 00-2-.712V17a1 1 0 001 1z" />
+                              </svg>
+                              <span className="text-xs">From your college</span>
+                            </div>
+                          )}
+
+                          {/* Urgency */}
+                          {daysUntil !== null && daysUntil <= 7 && daysUntil >= 0 && (
+                            <div className="flex items-center gap-2 text-sm text-gray-700">
+                              <svg className="w-4 h-4 text-orange-600" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
+                              </svg>
+                              <span className="text-xs font-semibold text-orange-600">
+                                Deadline in {daysUntil} {daysUntil === 1 ? 'day' : 'days'}!
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Deadline */}
+                      <div className="flex items-center gap-2 text-xs text-gray-500 pt-3 border-t border-gray-200">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                        Deadline: {event.deadline}
+                      </div>
                     </div>
                   </div>
                 );

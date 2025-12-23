@@ -1,15 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Navbar from '../components/Navbar.jsx';
-import TeamFit from '../components/TeamFit.jsx';
-import TeamDiscovery from '../components/TeamDiscovery.jsx';
+import TeamCompatibilityCard from '../components/TeamCompatibilityCard.jsx';
+import TeamCardSkeleton from '../components/TeamCardSkeleton.jsx';
+import InterestCelebration from '../components/InterestCelebration.jsx';
 import { supabase } from '../lib/supabase.js';
 import { useAuth } from '../hooks/useAuth.js';
 
 function EventDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+
+  // Defensive guard: prevent crash if useAuth is undefined
+  const authHook = useAuth?.() || { user: null, profile: null, profileLoading: false };
+  const { user, profile: cachedProfile, profileLoading } = authHook;
 
   const [event, setEvent] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -23,6 +27,10 @@ function EventDetail() {
   const [showInterestedUsers, setShowInterestedUsers] = useState(false);
   const [interestError, setInterestError] = useState(null);
 
+  // Celebration states
+  const [showCelebration, setShowCelebration] = useState(false);
+  const [animatedCount, setAnimatedCount] = useState(0);
+
   // Team states
   const [teams, setTeams] = useState([]);
   const [userTeam, setUserTeam] = useState(null);
@@ -30,6 +38,8 @@ function EventDetail() {
   const [showCreateTeam, setShowCreateTeam] = useState(false);
   const [teamName, setTeamName] = useState('');
   const [creatingTeam, setCreatingTeam] = useState(false);
+  const [joiningTeamId, setJoiningTeamId] = useState(null);
+  const [leavingTeam, setLeavingTeam] = useState(false);
   const [teamError, setTeamError] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
 
@@ -40,19 +50,35 @@ function EventDetail() {
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  // PERFORMANCE: Sequential fetching with proper dependencies
+
+  // Step 1: Fetch event when ID changes
   useEffect(() => {
     if (id) {
       fetchEvent();
     }
-  }, [id]);
+  }, [id]); // Only re-fetch when ID changes
 
-  // ✅ Separate effect to fetch interest and teams ONLY after event is loaded
+  // Step 2: Fetch interest data ONLY after event loads
   useEffect(() => {
-    if (event && id) {
+    if (event?.id && !loading) {
       fetchInterestData();
+    }
+  }, [event?.id, user?.id]); // Only when event or user changes
+
+  // Step 3: Fetch teams ONLY if user is interested
+  useEffect(() => {
+    if (isInterested && event?.id && !loading) {
       fetchTeams();
     }
-  }, [event, id, user]);
+  }, [isInterested, event?.id]); // Only when interest status or event changes
+
+  // Step 4: Use cached profile from useAuth
+  useEffect(() => {
+    if (cachedProfile && !profileLoading) {
+      setUserProfile(cachedProfile);
+    }
+  }, [cachedProfile, profileLoading]); // Use cached profile instead of fetching
 
   const fetchEvent = async () => {
     try {
@@ -89,29 +115,26 @@ function EventDetail() {
 
       // Check visibility - if event is college-restricted
       if (data.allowed_college) {
-        // Fetch user's college
-        if (user) {
-          const { data: profileData, error: profileError } = await supabase
-            .from('profiles')
-            .select('college')
-            .eq('user_id', user.id)
-            .maybeSingle();
-
-          if (profileError) {
-            console.error('Error fetching profile:', profileError);
-            setError('Failed to verify access. Please try again.');
-            setLoading(false);
-            return;
-          }
-
-          // Check if user has access
-          if (!profileData || profileData.college !== data.allowed_college) {
+        // PERFORMANCE: Use cached profile instead of fetching
+        if (user && cachedProfile && cachedProfile.college) {
+          // Check if user has access - only if profile and college exist
+          if (cachedProfile.college !== data.allowed_college) {
             // User doesn't have access to this restricted event
             setError('You do not have access to this event. This event is restricted to students from ' + data.allowed_college + '.');
             setEvent(null);
             setLoading(false);
             return;
           }
+        } else if (user && profileLoading) {
+          // Profile is still loading, wait
+          setLoading(true);
+          return;
+        } else if (user) {
+          // User logged in but no profile or no college - can't access restricted event
+          setError('This event is restricted to students from ' + data.allowed_college + '. Please complete your profile with your college information.');
+          setEvent(null);
+          setLoading(false);
+          return;
         } else {
           // Not logged in, can't access restricted event
           setError('This event is restricted. Please log in to view.');
@@ -193,9 +216,17 @@ function EventDetail() {
     setInterestLoading(true);
     setInterestError(null);
 
+    // Store old values for rollback
+    const oldIsInterested = isInterested;
+    const oldCount = interestCount;
+
     try {
       if (isInterested) {
-        // Remove interest
+        // Remove interest - optimistic update
+        setIsInterested(false);
+        setInterestCount(prev => Math.max(0, prev - 1));
+        setAnimatedCount(Math.max(0, oldCount - 1));
+
         const { error: deleteError } = await supabase
           .from('event_interest')
           .delete()
@@ -203,11 +234,16 @@ function EventDetail() {
           .eq('user_id', user.id);
 
         if (deleteError) throw deleteError;
-
-        setIsInterested(false);
-        setInterestCount(prev => Math.max(0, prev - 1));
       } else {
-        // Add interest
+        // Add interest - optimistic update
+        setIsInterested(true);
+        const newCount = oldCount + 1;
+        setInterestCount(newCount);
+        setAnimatedCount(newCount);
+
+        // Trigger celebration!
+        setShowCelebration(true);
+
         const { error: insertError } = await supabase
           .from('event_interest')
           .insert({
@@ -224,15 +260,18 @@ function EventDetail() {
           }
           throw insertError;
         }
-
-        setIsInterested(true);
-        setInterestCount(prev => prev + 1);
       }
 
       // Refresh interested users list
       await fetchInterestData();
     } catch (err) {
       console.error('Error toggling interest:', err);
+
+      // Rollback on error
+      setIsInterested(oldIsInterested);
+      setInterestCount(oldCount);
+      setAnimatedCount(oldCount);
+
       setInterestError('Could not update interest. Please try again.');
       // Auto-clear error after 5 seconds
       setTimeout(() => setInterestError(null), 5000);
@@ -248,51 +287,49 @@ function EventDetail() {
     try {
       setTeamsLoading(true);
 
-      // Fetch user profile for team fit analysis
-      if (user) {
-        const { data: profileData } = await supabase
-          .from('profiles')
-          .select('skills')
-          .eq('user_id', user.id)
-          .maybeSingle();
-        setUserProfile(profileData);
-      }
+      // PERFORMANCE: Use cached profile instead of fetching
+      // Profile is already set via useEffect from cachedProfile
 
-      // Fetch teams with member profiles (including skills)
+      // PERFORMANCE: Simplified query - no nested joins
+      // Step 1: Fetch teams only
       const { data: teamsData, error: teamsError } = await supabase
         .from('teams')
-        .select(`
-          *,
-          team_members (
-            user_id,
-            joined_at,
-            profiles:user_id (
-              name,
-              skills
-            )
-          )
-        `)
+        .select('*')
         .eq('event_id', id)
         .order('created_at', { ascending: false });
 
       if (teamsError) throw teamsError;
 
-      // Process teams data
-      const teamsWithDetails = (teamsData || []).map(team => {
-        // Flatten member data
-        const members = (team.team_members || []).map(tm => ({
-          user_id: tm.user_id,
-          joined_at: tm.joined_at,
-          name: tm.profiles?.name || 'Anonymous',
-          skills: tm.profiles?.skills || []
-        }));
+      // Step 2: Fetch team members separately (lighter query)
+      const teamIds = (teamsData || []).map(t => t.id);
 
-        return {
-          ...team,
-          members,
-          member_count: members.length
-        };
-      });
+      let teamsWithDetails = teamsData || [];
+
+      if (teamIds.length > 0) {
+        const { data: membersData, error: membersError } = await supabase
+          .from('team_members')
+          .select('team_id, user_id, joined_at')
+          .in('team_id', teamIds);
+
+        if (!membersError && membersData) {
+          // Group members by team
+          const membersByTeam = membersData.reduce((acc, member) => {
+            if (!acc[member.team_id]) acc[member.team_id] = [];
+            acc[member.team_id].push({
+              user_id: member.user_id,
+              joined_at: member.joined_at
+            });
+            return acc;
+          }, {});
+
+          // Attach members to teams
+          teamsWithDetails = teamsData.map(team => ({
+            ...team,
+            members: membersByTeam[team.id] || [],
+            member_count: (membersByTeam[team.id] || []).length
+          }));
+        }
+      }
 
       setTeams(teamsWithDetails);
 
@@ -311,15 +348,55 @@ function EventDetail() {
     }
   };
 
+  // TEAM NAME VALIDATION
+  const validateTeamName = (name) => {
+    if (!name || name.trim().length < 3) {
+      return 'Team name must be at least 3 characters';
+    }
+    if (name.trim().length > 50) {
+      return 'Team name must be less than 50 characters';
+    }
+    if (!/^[a-zA-Z0-9\s\-]+$/.test(name.trim())) {
+      return 'Team name can only contain letters, numbers, spaces, and hyphens';
+    }
+    return null;
+  };
+
   const handleCreateTeam = async () => {
     if (!user) {
       navigate('/login');
       return;
     }
 
-    if (!teamName.trim()) {
-      setTeamError('Please enter a team name');
+    // CRITICAL: Check if user is interested
+    if (!isInterested) {
+      setTeamError('❌ You must mark interest in this event first');
+      setTimeout(() => setTeamError(null), 5000);
+      return;
+    }
+
+    // Validate team name
+    const nameError = validateTeamName(teamName);
+    if (nameError) {
+      setTeamError(nameError);
       setTimeout(() => setTeamError(null), 3000);
+      return;
+    }
+
+    // Check for duplicate team names
+    const isDuplicate = teams.some(t =>
+      t.name.toLowerCase() === teamName.trim().toLowerCase()
+    );
+    if (isDuplicate) {
+      setTeamError('A team with this name already exists');
+      setTimeout(() => setTeamError(null), 5000);
+      return;
+    }
+
+    // Check if already in a team
+    if (userTeam) {
+      setTeamError('You are already in a team for this event');
+      setTimeout(() => setTeamError(null), 5000);
       return;
     }
 
@@ -330,7 +407,7 @@ function EventDetail() {
       setCreatingTeam(true);
       setTeamError(null);
 
-      // Create team
+      // Create team (trigger will auto-add creator to team_members)
       const { data: newTeam, error: createError } = await supabase
         .from('teams')
         .insert({
@@ -343,14 +420,26 @@ function EventDetail() {
 
       if (createError) throw createError;
 
+      // Success! Show toast
+      setTeamError(null);
+
       // Refresh teams
       await fetchTeams();
       setShowCreateTeam(false);
       setTeamName('');
+
+      // Show success message
+      alert('✅ Team created successfully! You have been added to the team.');
     } catch (err) {
       console.error('Error creating team:', err);
-      if (err.message.includes('already in a team')) {
+
+      // Improved error messages
+      if (err.message.includes('already in a team') || err.code === '23505') {
         setTeamError('You are already in a team for this event');
+      } else if (err.message.includes('interest')) {
+        setTeamError('You must mark interest in this event first');
+      } else if (err.message.includes('duplicate')) {
+        setTeamError('A team with this name already exists');
       } else {
         setTeamError('Could not create team. Please try again.');
       }
@@ -366,6 +455,45 @@ function EventDetail() {
       return;
     }
 
+    // CRITICAL: Check if user is interested
+    if (!isInterested) {
+      setTeamError('❌ You must mark interest in this event first');
+      setTimeout(() => setTeamError(null), 5000);
+      return;
+    }
+
+    // Check if already in a team
+    if (userTeam) {
+      setTeamError('You are already in a team for this event');
+      setTimeout(() => setTeamError(null), 5000);
+      return;
+    }
+
+    // Check team capacity
+    const team = teams.find(t => t.id === teamId);
+    if (team && team.member_count >= 4) {
+      setTeamError('This team is full (max 4 members)');
+      setTimeout(() => setTeamError(null), 5000);
+      return;
+    }
+
+    // Prevent double-clicks (debouncing)
+    if (joiningTeamId) return;
+    setJoiningTeamId(teamId);
+
+    // Optimistic UI update
+    const oldUserTeam = userTeam;
+    const oldTeams = [...teams];
+
+    if (team) {
+      setUserTeam(team);
+      setTeams(teams.map(t =>
+        t.id === teamId
+          ? { ...t, member_count: t.member_count + 1 }
+          : t
+      ));
+    }
+
     try {
       setTeamError(null);
 
@@ -376,30 +504,61 @@ function EventDetail() {
           user_id: user.id
         });
 
-      if (joinError) {
-        if (joinError.message.includes('already in a team')) {
-          setTeamError('You are already in a team for this event');
-        } else {
-          setTeamError('Could not join team. Please try again.');
-        }
-        setTimeout(() => setTeamError(null), 5000);
-        return;
-      }
+      if (joinError) throw joinError;
 
-      // Refresh teams
+      // Success! Refresh to get accurate data
       await fetchTeams();
+
+      // Show success message
+      alert(`✅ You joined ${team?.name || 'the team'}!`);
     } catch (err) {
       console.error('Error joining team:', err);
-      setTeamError('Could not join team. Please try again.');
+
+      // Rollback optimistic update
+      setUserTeam(oldUserTeam);
+      setTeams(oldTeams);
+
+      // Improved error messages
+      if (err.message.includes('already in a team') || err.code === '23505') {
+        setTeamError('You are already in a team for this event');
+      } else if (err.message.includes('interest')) {
+        setTeamError('You must mark interest in this event first');
+      } else if (err.message.includes('full')) {
+        setTeamError('This team is full (max 4 members)');
+      } else {
+        setTeamError('Could not join team. Please try again.');
+      }
       setTimeout(() => setTeamError(null), 5000);
+    } finally {
+      setJoiningTeamId(null);
     }
   };
 
   const handleLeaveTeam = async () => {
     if (!user || !userTeam) return;
 
-    const confirmLeave = window.confirm('Are you sure you want to leave this team?');
+    const confirmLeave = window.confirm(
+      `Are you sure you want to leave "${userTeam.name}"?\n\n` +
+      (userTeam.created_by === user.id
+        ? 'Note: As the creator, ownership will transfer to the oldest member.'
+        : '')
+    );
     if (!confirmLeave) return;
+
+    // Prevent double-clicks
+    if (leavingTeam) return;
+    setLeavingTeam(true);
+
+    // Optimistic UI update
+    const oldUserTeam = userTeam;
+    const oldTeams = [...teams];
+
+    setUserTeam(null);
+    setTeams(teams.map(t =>
+      t.id === userTeam.id
+        ? { ...t, member_count: Math.max(0, t.member_count - 1) }
+        : t
+    ));
 
     try {
       setTeamError(null);
@@ -412,12 +571,22 @@ function EventDetail() {
 
       if (leaveError) throw leaveError;
 
-      // Refresh teams
+      // Refresh teams (team may be auto-deleted if last member)
       await fetchTeams();
+
+      // Show success message
+      alert('✅ You left the team successfully');
     } catch (err) {
       console.error('Error leaving team:', err);
+
+      // Rollback optimistic update
+      setUserTeam(oldUserTeam);
+      setTeams(oldTeams);
+
       setTeamError('Could not leave team. Please try again.');
       setTimeout(() => setTeamError(null), 5000);
+    } finally {
+      setLeavingTeam(false);
     }
   };
 
@@ -918,10 +1087,10 @@ function EventDetail() {
               <button
                 onClick={handleToggleInterest}
                 disabled={interestLoading}
-                className={`px-8 py-4 rounded-xl font-bold flex items-center gap-3 min-w-[200px] justify-center transition-all ${isInterested
-                  ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-                  : 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-lg'
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                className={`px-8 py-4 rounded-xl font-bold flex items-center gap-3 min-w-[200px] justify-center transition-all duration-300 ${isInterested
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-700 scale-100'
+                  : 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-lg hover:scale-105'
+                  } disabled:opacity-50 disabled:cursor-not-allowed ${interestLoading ? '' : 'active:scale-95'}`}
               >
                 {interestLoading ? (
                   <>
@@ -1019,9 +1188,10 @@ function EventDetail() {
                   </div>
                   <button
                     onClick={handleLeaveTeam}
-                    className="px-4 py-2 text-sm font-semibold text-red-600 hover:text-red-700 border border-red-300 rounded-lg hover:bg-red-50 transition-colors"
+                    disabled={leavingTeam}
+                    className="px-4 py-2 text-sm font-semibold text-red-600 hover:text-red-700 border border-red-300 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Leave Team
+                    {leavingTeam ? 'Leaving...' : 'Leave Team'}
                   </button>
                 </div>
               </div>
@@ -1090,91 +1260,47 @@ function EventDetail() {
               </div>
             )}
 
-            {/* Team Discovery - Show compatible teams if user is interested but not in a team */}
-            {!userTeam && isInterested && !teamsLoading && teams.length > 0 && userProfile && (
-              <div className="mb-6">
-                <TeamDiscovery
-                  userProfile={userProfile}
-                  teams={teams}
-                  eventRequiredSkills={event?.required_skills || []}
-                  onJoinTeam={handleJoinTeam}
-                />
-              </div>
-            )}
-
             {/* Teams List - ONLY visible to interested users */}
             {isInterested && (
               <>
                 {teamsLoading ? (
-                  <div className="space-y-3">
-                    {[1, 2, 3].map(i => (
-                      <div key={i} className="bg-white rounded-xl border border-gray-200 p-6 animate-pulse">
-                        <div className="h-5 bg-gray-200 rounded w-1/3 mb-2"></div>
-                        <div className="h-4 bg-gray-200 rounded w-1/4"></div>
-                      </div>
-                    ))}
-                  </div>
+                  <TeamCardSkeleton count={3} />
                 ) : teams.length > 0 ? (
-                  <div className="space-y-3">
-                    {teams.map(team => (
-                      <div
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {teams.map((team, index) => (
+                      <TeamCompatibilityCard
                         key={team.id}
-                        className={`bg-white rounded-xl border p-6 transition-all ${userTeam?.id === team.id
-                          ? 'border-emerald-300 bg-emerald-50'
-                          : 'border-gray-200 hover:border-indigo-300 hover:shadow-md'
-                          }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex-1">
-                            <h4 className="text-lg font-bold text-gray-900 mb-1">{team.name}</h4>
-                            <div className="flex items-center gap-4 text-sm text-gray-600">
-                              <span className="flex items-center gap-1">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                                </svg>
-                                {team.member_count} {team.member_count === 1 ? 'member' : 'members'}
-                              </span>
-                            </div>
-                          </div>
-                          {!userTeam && user && (
-                            <button
-                              onClick={() => handleJoinTeam(team.id)}
-                              className="px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors"
-                            >
-                              Join Team
-                            </button>
-                          )}
-                          {userTeam?.id === team.id && (
-                            <span className="px-4 py-2 bg-emerald-100 text-emerald-700 font-semibold rounded-lg text-sm">
-                              Your Team
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Team Fit Analysis - Only show if not in a team */}
-                        {!userTeam && user && (
-                          <TeamFit
-                            userSkills={userProfile?.skills || []}
-                            teamMembers={team.members || []}
-                            eventRequiredSkills={event?.required_skills || []}
-                          />
-                        )}
-                      </div>
+                        team={team}
+                        event={event}
+                        userProfile={userProfile || cachedProfile}
+                        onJoinTeam={() => handleJoinTeam(team.id)}
+                        isUserInTeam={userTeam?.id === team.id}
+                        isJoining={joiningTeamId === team.id}
+                        disabled={!!userTeam || joiningTeamId !== null}
+                        animationDelay={index * 100}
+                      />
                     ))}
                   </div>
                 ) : (
-                  <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
-                    <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                      </svg>
-                    </div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                      No Teams Yet
+                  <div className="text-center py-16 bg-gradient-to-br from-blue-50 to-purple-50 rounded-2xl border-2 border-dashed border-gray-300">
+                    <div className="text-6xl mb-4 animate-bounce">🚀</div>
+                    <h3 className="text-2xl font-bold text-gray-900 mb-2">
+                      Be the First to Form a Team!
                     </h3>
-                    <p className="text-gray-600 mb-6">
-                      Be the first to create a team for this event
+                    <p className="text-gray-600 mb-6 max-w-md mx-auto">
+                      No teams yet for this event. Create one and others will join you based on skill compatibility.
                     </p>
+                    {!userTeam && (
+                      <button
+                        onClick={() => setShowCreateTeam(true)}
+                        className="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-all shadow-lg hover:shadow-xl inline-flex items-center gap-2"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                        Create Team
+                      </button>
+                    )}
                   </div>
                 )}
               </>
@@ -1239,6 +1365,13 @@ function EventDetail() {
           </div>
         </div>
       )}
+
+      {/* Interest Celebration */}
+      <InterestCelebration
+        show={showCelebration}
+        interestCount={animatedCount || interestCount}
+        onComplete={() => setShowCelebration(false)}
+      />
     </div>
   );
 }

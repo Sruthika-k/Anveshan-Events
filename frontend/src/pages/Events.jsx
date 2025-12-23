@@ -6,7 +6,11 @@ import { useAuth } from '../hooks/useAuth.js';
 
 function Events() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+
+  // Defensive guard: prevent crash if useAuth is undefined
+  const authHook = useAuth?.() || { user: null };
+  const { user } = authHook;
+
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -25,7 +29,7 @@ function Events() {
       const { data } = await supabase
         .from('profiles')
         .select('college')
-        .eq('user_id', user.id)
+        .eq('id', user.id)
         .maybeSingle();
 
       const college = data?.college || null;

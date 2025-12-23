@@ -2,9 +2,9 @@ import { Navigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.js';
 
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth();
+  const { user, loading } = useAuth();
 
-  // Show loading state while checking authentication
+  // IF loading === true: render spinner
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -21,12 +21,12 @@ function ProtectedRoute({ children }) {
     );
   }
 
-  // Redirect to login if not authenticated
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
+  // ELSE IF user === null: redirect to "/"
+  if (!user) {
+    return <Navigate to="/" replace />;
   }
 
-  // Render protected content
+  // ELSE: render children
   return children;
 }
 

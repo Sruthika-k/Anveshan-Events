@@ -6,7 +6,11 @@ import { useAuth } from '../hooks/useAuth.js';
 function Navbar() {
     const navigate = useNavigate();
     const location = useLocation();
-    const { user, role, roleLoading } = useAuth(); // Use centralized role from useAuth
+
+    // Defensive guard: prevent crash if useAuth is undefined
+    const authHook = useAuth?.() || { user: null, role: 'student', roleLoading: false };
+    const { user, role, roleLoading } = authHook;
+
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [loggingOut, setLoggingOut] = useState(false);
 

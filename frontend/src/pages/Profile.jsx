@@ -46,11 +46,11 @@ function Profile() {
       if (user) {
         console.log('Fetching profile for user:', user.id);
 
-        // Fetch profile using user_id column (not id)
+        // Fetch profile using id column
         const { data: profileData, error: profileError } = await supabase
           .from('profiles')
           .select('*')
-          .eq('user_id', user.id)
+          .eq('id', user.id)
           .maybeSingle(); // Use maybeSingle() instead of single() to handle missing rows
 
         if (profileError) {
@@ -105,7 +105,7 @@ function Profile() {
       console.log('Saving profile for user:', user.id);
 
       const profilePayload = {
-        user_id: user.id, // Use user_id, not id
+        id: user.id, // profiles table uses 'id' as PK (FK to auth.users)
         name: formData.name.trim() || null,
         college: formData.college.trim() || null,
         year: formData.year.trim() || null,
@@ -114,11 +114,11 @@ function Profile() {
 
       console.log('Profile payload:', profilePayload);
 
-      // Check if profile exists using user_id
+      // Check if profile exists using id
       const { data: existingProfile, error: checkError } = await supabase
         .from('profiles')
-        .select('user_id')
-        .eq('user_id', user.id)
+        .select('id')
+        .eq('id', user.id)
         .maybeSingle();
 
       if (checkError) {
@@ -133,7 +133,7 @@ function Profile() {
         result = await supabase
           .from('profiles')
           .update(profilePayload)
-          .eq('user_id', user.id)
+          .eq('id', user.id)
           .select();
       } else {
         console.log('Inserting new profile');
@@ -225,7 +225,7 @@ function Profile() {
               <div className="w-24 h-24 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center flex-shrink-0">
                 {profile?.name ? (
                   <span className="text-4xl font-bold text-white">
-                    {profile.name.charAt(0).toUpperCase()}
+                    {profile?.name?.charAt(0)?.toUpperCase() || '?'}
                   </span>
                 ) : (
                   <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -420,7 +420,7 @@ function Profile() {
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Profile Information</h2>
 
                 <div className="space-y-4">
-                  {profile.name && (
+                  {profile?.name && (
                     <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-xl">
                       <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center flex-shrink-0">
                         <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -429,7 +429,7 @@ function Profile() {
                       </div>
                       <div className="flex-1">
                         <p className="text-sm font-semibold text-gray-500 mb-1">Full Name</p>
-                        <p className="text-base font-medium text-gray-900">{profile.name}</p>
+                        <p className="text-base font-medium text-gray-900">{profile?.name || 'Not set'}</p>
                       </div>
                     </div>
                   )}
@@ -443,7 +443,7 @@ function Profile() {
                       </div>
                       <div className="flex-1">
                         <p className="text-sm font-semibold text-gray-500 mb-1">College</p>
-                        <p className="text-base font-medium text-gray-900">{profile.college}</p>
+                        <p className="text-base font-medium text-gray-900">{profile?.college || 'Not set'}</p>
                       </div>
                     </div>
                   )}
